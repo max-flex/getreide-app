@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Getreide-Wissensdatenbank</title>
+  <link rel="manifest" href="manifest.json" />
+  <meta name="theme-color" content="#0a1120" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Getreide" />
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png" />
+  <link rel="icon" href="icons/icon-192.png" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="app-header">
+    <div class="brand">
+      <span class="logo">🌾</span>
+      <div>
+        <h1>Getreide-Wissensdatenbank</h1>
+        <p class="tagline">Anbau · Wetter · Reife- &amp; Ernteprognose · Bio-Pflanzenschutz</p>
+      </div>
+    </div>
+    <nav class="tabs" id="tabs">
+      <button class="tab active" data-tab="dashboard">Übersicht</button>
+      <button class="tab" data-tab="fields">Felder &amp; Kulturen</button>
+      <button class="tab" data-tab="weather">Wetter &amp; Prognose</button>
+      <button class="tab" data-tab="diseases">Krankheiten</button>
+      <button class="tab" data-tab="weeds">Unkraut (Bio)</button>
+      <button class="tab" data-tab="compare">Vergleich</button>
+      <button class="tab" data-tab="knowledge">Erkenntnisse</button>
+      <button class="tab" data-tab="assistant">🤖 Assistent</button>
+      <button class="tab" data-tab="data">Daten</button>
+      <button class="tab" data-tab="help">Hilfe</button>
+    </nav>
+  </header>
+
+  <main id="main">
+    <section id="view-dashboard" class="view active"></section>
+    <section id="view-fields" class="view"></section>
+    <section id="view-weather" class="view"></section>
+    <section id="view-diseases" class="view"></section>
+    <section id="view-weeds" class="view"></section>
+    <section id="view-compare" class="view"></section>
+    <section id="view-knowledge" class="view"></section>
+    <section id="view-assistant" class="view"></section>
+    <section id="view-data" class="view"></section>
+    <section id="view-help" class="view"></section>
+  </main>
+
+  <div id="modal-backdrop" class="modal-backdrop hidden">
+    <div class="modal" role="dialog" aria-modal="true">
+      <button class="modal-close" id="modal-close" aria-label="Schließen">×</button>
+      <div id="modal-content"></div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="data.js"></script>
+  <script src="app.js"></script>
+  <script>
+    if ("serviceWorker" in navigator) {
+      window.addEventListener("load", () => {
+        navigator.serviceWorker.register("service-worker.js").catch((err) => {
+          console.warn("Service Worker Registrierung fehlgeschlagen:", err);
+        });
+      });
+    }
+  </script>
+</body>
+</html>

@@ -1,6 +1,6 @@
 # 🌾 Getreide-Wissensdatenbank — Projekt-Zusammenfassung
 
-> Handover-Dokument. Stand: 2026-07-04. Diese Datei fasst zusammen, **was** die App
+> Handover-Dokument. Stand: 2026-07-06. Diese Datei fasst zusammen, **was** die App
 > kann, **wie** sie aufgebaut ist und **wo** man weitermachen kann — damit die Arbeit
 > auch ohne den ursprünglichen Chatverlauf fortgesetzt werden kann.
 
@@ -55,14 +55,15 @@ Zwei Wege, siehe Chat-Antwort vom 2026-07-04 für die volle Anleitung:
 | Tab | Inhalt |
 |---|---|
 | **Übersicht** | Dashboard: Kennzahlen + je Feld Reifestand (BBCH), Fortschrittsbalken, Ernteprognose |
-| **Felder & Kulturen** | Feld anlegen/bearbeiten: Kultur, Standort per **Karte anklicken** (Standard Südtirol) oder Ortssuche, Aussaatdatum, Fläche, Fotos, Notizen, Ernte-Chronik. Modellparameter je Feld unter „Erweitert" anpassbar |
+| **Felder & Kulturen** | Feld anlegen/bearbeiten: Kultur, Standort per **Karte anklicken** (Standard Südtirol) oder Ortssuche, Aussaatdatum, Fläche, **Einsaatmengen-Historie je Jahr (kg)**, **Sämaschinen-Einstellung (kg/ha)**, **Foto direkt beim Anlegen**, Notizen, Ernte-Chronik. Modellparameter je Feld unter „Erweitert" anpassbar |
 | **Wetter & Prognose** | Vergangene Witterung + 16-Tage-Vorhersage, Temperatur-/Niederschlags-Diagramm, Wärmesummen-Kurve, Stadien |
 | **Krankheiten** | 10 Pilze/Schädlinge mit begünstigender Witterung, Bio-Maßnahmen, Zeitpunkt; filterbar nach Kultur, erweiterbar |
 | **Unkraut (Bio)** | 8 Beikräuter mit Bio-Maßnahmen & Eingriffszeitpunkt + Striegel-Faustregeln; filterbar, erweiterbar |
 | **Vergleich** | Mehrjahresvergleich Erntetermine (Diagramm Erntedatum × Jahr, Linie je Kultur, Prognose als hohler Punkt) + Chronik-Tabelle (Vegetationsdauer, Ertrag) |
+| **Blattstadien** | Info-Reiter: BBCH-Entwicklungsstadien für Getreide (8 Stadien) und Buchweizen (5 Stadien, Sonderfall) mit Inline-SVG-Illustrationen, Beschreibung und BBCH-Code + Erklärung der Skala |
 | **Erkenntnisse** | Notizen/Beobachtungen + eigene & kuratierte Fachquellen (inkl. Südtirol: Laimburg, BRING, Bioland Südtirol) |
-| **🤖 Assistent** | Chatbot für Fragen/Lösungen, kennt die eigenen Felddaten (Prompt-Kontext) und kann per Websuche auf aktuelle Infos zugreifen. Einziger Tab, der **nicht lokal** läuft (siehe Abschnitt 3a) |
-| **Daten** | Vollständiges JSON-Backup (inkl. Fotos) herunterladen, Import (Zusammenführen/Ersetzen), Zurücksetzen |
+| **🤖 Assistent** | Chatbot für Fragen/Lösungen **inkl. Foto-Bildanalyse** (Boden/Pflanze/Unkraut → Bio-Tipps), kennt die eigenen Felddaten (Prompt-Kontext) und kann per Websuche auf aktuelle Infos zugreifen. Einziger Tab, der **nicht lokal** läuft (siehe Abschnitt 3a) |
+| **Daten** | JSON-Backup (inkl. Fotos) erstellen → erscheint als **teilbare Datei-Karte** (Teilen via Web-Share-API / Download-Fallback), Import (Zusammenführen/Ersetzen), Zurücksetzen |
 | **Hilfe** | Bedienung, Datenschutz, Modellhinweis, Datenquellen |
 
 ---
@@ -80,6 +81,11 @@ da kein Node/npm zur Verfügung steht, siehe Abschnitt 4).
   (Kultur, Standort, Aussaat, aktueller Reifestand/BBCH, Ernteprognose) und der letzten
   5 Notizen als System-Prompt mitgeschickt (`buildAssistantContext()` in `app.js`).
 - **Internetzugriff:** Server-seitiges Websearch-Tool (`web_search_20260209`), ein-/ausschaltbar.
+- **Bildanalyse:** Über den 📷-Button kann ein Foto (Boden/Pflanze/Unkraut) angehängt werden.
+  Es wird client-seitig auf max. 1024 px verkleinert (`resizeImageToDataURL`) und als Vision-Block
+  (base64 JPEG) mitgesendet; der System-Prompt weist Claude an, Unkraut zu bestimmen, Krankheits-/
+  Nährstoffsymptome und Boden zu beurteilen und Bio-Maßnahmen zu empfehlen. `chatMsgToApi()` baut je
+  Nachricht entweder reinen Text oder `[image, text]`-Content.
 - **Speicherung (Store `settings` in IndexedDB, seit DB-Version 3):** API-Key, gewähltes
   Modell und Chatverlauf liegen nur lokal im Browser — **bewusst nicht** Teil von
   `exportAll`/`importAll` (Backup), damit der Key nicht versehentlich in einer geteilten
@@ -173,9 +179,18 @@ Beim Bau erfolgreich getestet (im Browser, echte Live-Dienste):
 - **Witterungsbasierte Krankheits-Risikoampel:** geladene Wetterdaten automatisch mit
   den `risk`-Bedingungen der Erreger (in `DISEASES_SEED`) abgleichen → Ampel je Feld.
 - ~~PWA: Manifest + Service Worker~~ **erledigt (2026-07-04)** — siehe Abschnitt 4/2a.
+- ~~Assistent-Chatbot~~ **erledigt (2026-07-04)** — siehe Abschnitt 3a.
+- ~~Teilbares Backup, Einsaat-Historie/Sämaschine, Foto beim Anlegen, Ertrag in kg/kg-ha,
+  Blattstadien-Info-Tab, Foto-Bildanalyse~~ **erledigt (2026-07-06)**.
 - **Automatische Prognose-Aktualisierung** im Hintergrund (statt manuell „aktualisieren").
 - **Saatgut-/Sorten-/Düngungs-Tagebuch** je Feld.
 - **Kalibrierung** der `gddToMaturity`-Werte aus den erfassten Ernteterminen.
+- **Fotos in der Bildanalyse** direkt aus Feld-Fotos wählen (statt nur neuem Upload).
+
+**Datenmodell-Notiz (2026-07-06):** Neue Felder auf bestehenden Objekten (kein neuer Store,
+DB bleibt bei Version 3): `field.seedRateKgHa`, `field.seedHistory` (`[{year, kg}]`);
+`harvest.amountKg`, `harvest.yieldKgHa` (alte Einträge nutzen weiter `yieldDtHa`, werden von
+`harvestYieldText()` umgerechnet dargestellt); Chatnachrichten optional mit `imageDataURL`.
 
 ---
 

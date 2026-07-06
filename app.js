@@ -258,8 +258,10 @@ function photoURL(photo) {
 const App = {
   fields: [], notes: [], sources: [], userWeeds: [], userDiseases: [], harvests: [], tab: "dashboard",
   assistantSettings: { apiKey: "", model: "claude-opus-4-8", webSearch: true },
-  chatMessages: [], // { role: "user"|"assistant", text, citations? }
-  chatBusy: false
+  chatMessages: [], // { role: "user"|"assistant", text, citations?, imageDataURL? }
+  chatBusy: false,
+  chatImage: null,   // angehängtes Bild (dataURL) für die nächste Nachricht
+  lastBackup: null   // { blob, filename, createdAt, fields, photos } – nur für die Sitzung
 };
 
 function switchTab(tab) {
@@ -278,6 +280,7 @@ function render() {
   if (App.tab === "weeds") renderWeeds();
   if (App.tab === "compare") renderCompare();
   if (App.tab === "knowledge") renderKnowledge();
+  if (App.tab === "stages") renderStages();
   if (App.tab === "assistant") renderAssistant();
   if (App.tab === "data") renderData();
   if (App.tab === "help") renderHelp();
@@ -427,6 +430,17 @@ function fieldForm(field) {
     <input type="hidden" id="ff-country" value="${esc(f.country || "")}" />
     <label>Aussaatdatum</label>
     <input id="ff-sow" type="date" value="${f.sowDate || ""}" />
+    <div class="row">
+      <div><label>Einstellung Sämaschine (kg/ha)</label>
+        <input id="ff-seedrate" type="number" step="0.1" value="${f.seedRateKgHa ?? ""}" placeholder="z. B. 160" /></div>
+    </div>
+    <label>Einsaatmenge je Jahr (kg) – Historie</label>
+    <div id="ff-seedhist"></div>
+    <button class="btn small ghost" id="ff-addseed" type="button" style="margin-top:6px">＋ Jahr hinzufügen</button>
+    <p class="hint">z. B. 2025: 30 kg, 2026: 35 kg – so bleibt die Historie der Einsaatmengen erhalten.</p>
+    <label>Foto(s) vom Feld</label>
+    <input type="file" id="ff-photos" accept="image/*" multiple />
+    <div id="ff-photo-info" class="hint"></div>
     <details style="margin-top:12px">
       <summary class="muted" style="cursor:pointer">Erweitert: Modellparameter (Temperatursummen)</summary>
       <div class="row">
@@ -453,6 +467,28 @@ function fieldForm(field) {
 
   $("#ff-crop").onchange = (e) => { $("#ff-custom").style.display = e.target.value === "custom" ? "block" : "none"; };
   $("#ff-cancel").onclick = closeModal;
+
+  // --- Einsaatmengen-Historie (Jahr + kg) ---
+  const seedRow = (year = "", kg = "") => {
+    const d = document.createElement("div");
+    d.className = "row seed-row";
+    d.innerHTML = `
+      <input type="number" class="sh-year" placeholder="Jahr" min="2000" max="2100" value="${year}" style="flex:1" />
+      <input type="number" class="sh-kg" placeholder="kg" step="0.1" value="${kg}" style="flex:1" />
+      <button type="button" class="btn small ghost sh-del" style="flex:0;min-width:auto">×</button>`;
+    d.querySelector(".sh-del").onclick = () => d.remove();
+    $("#ff-seedhist").appendChild(d);
+  };
+  (f.seedHistory || []).forEach(s => seedRow(s.year, s.kg));
+  if (!(f.seedHistory || []).length) {
+    const y = f.sowDate ? new Date(f.sowDate).getFullYear() : new Date().getFullYear();
+    seedRow(y, "");
+  }
+  $("#ff-addseed").onclick = () => seedRow(new Date().getFullYear() + (field ? 1 : 0), "");
+  $("#ff-photos").onchange = (e) => {
+    $("#ff-photo-info").textContent = e.target.files.length
+      ? `${e.target.files.length} Foto(s) ausgewählt – werden beim Speichern hinzugefügt.` : "";
+  };
   $("#ff-geo").onclick = async () => {
     const q = $("#ff-place").value.trim(); if (!q) return;
     $("#ff-geo-results").innerHTML = `<p class="muted">Suche …</p>`;
@@ -484,10 +520,17 @@ function fieldForm(field) {
     obj.sowDate = $("#ff-sow").value || null;
     obj.baseTemp = $("#ff-base").value !== "" ? parseFloat($("#ff-base").value) : null;
     obj.gddToMaturity = $("#ff-gdd").value !== "" ? parseFloat($("#ff-gdd").value) : null;
+    obj.seedRateKgHa = $("#ff-seedrate").value !== "" ? parseFloat($("#ff-seedrate").value) : null;
+    obj.seedHistory = $$(".seed-row", $("#ff-seedhist")).map(r => ({
+      year: parseInt(r.querySelector(".sh-year").value, 10) || null,
+      kg: r.querySelector(".sh-kg").value !== "" ? parseFloat(r.querySelector(".sh-kg").value) : null
+    })).filter(s => s.year && s.kg != null).sort((a, b) => a.year - b.year);
     obj.notes = $("#ff-notes").value.trim();
     // bei Standort-/Aussaatänderung Cache verwerfen
     if (field && (field.lat !== obj.lat || field.lon !== obj.lon || field.sowDate !== obj.sowDate)) obj.weatherCache = null;
     await DB.put("fields", obj);
+    const photoFiles = $("#ff-photos").files;
+    if (photoFiles.length) await addPhotos(obj.id, photoFiles);
     closeModal(); await reload();
     toast("Gespeichert ✓");
   };
@@ -510,8 +553,10 @@ async function fieldDetail(id) {
       <button class="btn small ghost" id="fd-edit">Bearbeiten</button>
     </div>
     <p class="meta muted">${esc(cropParams(f).name)} · 📍 ${esc(f.locationName || "–")} ${f.areaHa ? "· " + f.areaHa + " ha" : ""}</p>
-    <p class="meta">Aussaat: <strong>${fmtDate(f.sowDate)}</strong> ${c ? `· Typ: ${esc(c.type)}` : ""}</p>
+    <p class="meta">Aussaat: <strong>${fmtDate(f.sowDate)}</strong> ${c ? `· Typ: ${esc(c.type)}` : ""}
+      ${f.seedRateKgHa ? `· Sämaschine: <strong>${f.seedRateKgHa} kg/ha</strong>` : ""}</p>
     ${c ? `<p class="hint">Aussaatfenster ${esc(c.sowWindow)} · typ. Ernte ${esc(c.harvestWindow)}</p>` : ""}
+    ${(f.seedHistory || []).length ? `<p class="meta">🌾 Einsaatmengen: ${f.seedHistory.map(s => `${s.year}: <strong>${s.kg} kg</strong>`).join(" · ")}</p>` : ""}
     <hr class="sep"/>
     <div class="flex-between"><h3 style="margin:0">Reife &amp; Ernteprognose</h3>
       <button class="btn small" id="fd-refresh">↻ Wetter aktualisieren</button></div>
@@ -537,7 +582,7 @@ async function fieldDetail(id) {
     const veg = (hh.sowDate && hh.harvestDate) ? daysBetween(hh.sowDate, hh.harvestDate) + " T" : "–";
     return `<div class="note-item"><div class="flex-between"><strong>Ernte ${new Date(hh.harvestDate).getFullYear()}: ${fmtDate(hh.harvestDate)}</strong>
       <button class="btn small ghost" data-delfh="${hh.id}">×</button></div>
-      <div class="date">Veg.-dauer ${veg}${hh.yieldDtHa != null ? " · " + hh.yieldDtHa + " dt/ha" : ""}</div>
+      <div class="date">Veg.-dauer ${veg}${harvestYieldText(hh) ? " · " + harvestYieldText(hh) : ""}</div>
       ${hh.note ? `<div style="font-size:.88rem">${esc(hh.note)}</div>` : ""}</div>`;
   }).join("") : `<p class="muted" style="font-size:.88rem">Noch keine Ernte erfasst.</p>`;
   $("#fd-harvest").onclick = () => harvestForm(id);
@@ -910,13 +955,22 @@ function renderCompare() {
       <td>${fmtDate(h.sowDate)}</td>
       <td><strong>${fmtDate(h.harvestDate)}</strong></td>
       <td>${veg != null ? veg + " Tage" : "–"}</td>
-      <td>${h.yieldDtHa != null ? h.yieldDtHa + " dt/ha" : "–"}</td>
+      <td>${harvestYieldText(h) || "–"}</td>
       <td>${esc(h.note || "")}</td>
       <td><button class="btn small ghost" data-delh="${h.id}">×</button></td>
     </tr>`;
   }).join("");
   $("#cmp-table").innerHTML = `<thead><tr><th>Jahr</th><th>Kultur</th><th>Feld</th><th>Aussaat</th><th>Ernte</th><th>Veg.-dauer</th><th>Ertrag</th><th>Notiz</th><th></th></tr></thead><tbody>${rows}</tbody>`;
   $$("[data-delh]").forEach(b => b.onclick = async () => { await DB.del("harvests", b.dataset.delh); await loadAll(); renderCompare(); });
+}
+
+// Ertragsanzeige: neue Einträge (amountKg/yieldKgHa), alte Einträge (yieldDtHa) kompatibel
+function harvestYieldText(h) {
+  const kgHa = h.yieldKgHa ?? (h.yieldDtHa != null ? h.yieldDtHa * 100 : null);
+  const parts = [];
+  if (h.amountKg != null) parts.push(`${h.amountKg} kg gesamt`);
+  if (kgHa != null) parts.push(`${Math.round(kgHa)} kg/ha`);
+  return parts.join(" · ") || null;
 }
 
 function harvestForm(fieldId) {
@@ -930,14 +984,34 @@ function harvestForm(fieldId) {
       <div><label>Erntedatum</label><input id="hf-harvest" type="date" value="${todayISO()}" /></div>
     </div>
     <div class="row">
-      <div><label>Ertrag (dt/ha)</label><input id="hf-yield" type="number" step="0.1" placeholder="z. B. 45" /></div>
+      <div><label>Erntemenge gesamt (kg)</label><input id="hf-kg" type="number" step="1" placeholder="z. B. 4500" /></div>
+      <div><label>Ertrag (kg/ha)</label><input id="hf-kgha" type="number" step="1" placeholder="autom. aus Fläche" /></div>
     </div>
+    <p class="hint" id="hf-areahint"></p>
     <label>Notiz (Sorte, Qualität, Witterung …)</label><textarea id="hf-note"></textarea>
     <hr class="sep"/>
     <div class="row"><button class="btn ghost" id="hf-cancel">Abbrechen</button><button class="btn" id="hf-save">Speichern</button></div>
   `);
   $("#hf-cancel").onclick = closeModal;
-  $("#hf-field") && ($("#hf-field").onchange = () => { const f = App.fields.find(x => x.id === $("#hf-field").value); if (f && !$("#hf-sow").value) $("#hf-sow").value = f.sowDate || ""; });
+  // kg/ha automatisch aus Gesamtmenge und Feldfläche berechnen (bleibt manuell überschreibbar)
+  const currentArea = () => App.fields.find(x => x.id === $("#hf-field")?.value)?.areaHa || null;
+  const updateAreaHint = () => {
+    const a = currentArea();
+    $("#hf-areahint").textContent = a
+      ? `Fläche des Feldes: ${a} ha – kg/ha wird automatisch berechnet.`
+      : "Keine Fläche am Feld hinterlegt – kg/ha bitte selbst eintragen.";
+  };
+  const autoKgHa = () => {
+    const a = currentArea(); const kg = parseFloat($("#hf-kg").value);
+    if (a && !isNaN(kg)) $("#hf-kgha").value = Math.round(kg / a);
+  };
+  updateAreaHint();
+  $("#hf-kg").oninput = autoKgHa;
+  $("#hf-field") && ($("#hf-field").onchange = () => {
+    const f = App.fields.find(x => x.id === $("#hf-field").value);
+    if (f && !$("#hf-sow").value) $("#hf-sow").value = f.sowDate || "";
+    updateAreaHint(); autoKgHa();
+  });
   $("#hf-save").onclick = async () => {
     const fid = $("#hf-field")?.value || null;
     const f = App.fields.find(x => x.id === fid);
@@ -945,7 +1019,8 @@ function harvestForm(fieldId) {
     await DB.put("harvests", {
       id: uid(), fieldId: fid, fieldName: f?.name || "", crop: f?.crop || "custom",
       sowDate: $("#hf-sow").value || null, harvestDate: $("#hf-harvest").value,
-      yieldDtHa: $("#hf-yield").value !== "" ? parseFloat($("#hf-yield").value) : null,
+      amountKg: $("#hf-kg").value !== "" ? parseFloat($("#hf-kg").value) : null,
+      yieldKgHa: $("#hf-kgha").value !== "" ? parseFloat($("#hf-kgha").value) : null,
       note: $("#hf-note").value.trim(), createdAt: Date.now()
     });
     closeModal(); await loadAll();
@@ -999,11 +1074,35 @@ async function exportAll() {
   const photos = await DB.all("photos");
   for (const p of photos) data.photos.push({ id: p.id, fieldId: p.fieldId, name: p.name, date: p.date, dataURL: await blobToDataURL(p.blob) });
   const blob = new Blob([JSON.stringify(data)], { type: "application/json" });
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
-  a.download = `getreide-backup_${todayISO()}.json`;
-  a.click(); URL.revokeObjectURL(a.href);
+  App.lastBackup = {
+    blob, filename: `getreide-backup_${todayISO()}.json`,
+    createdAt: new Date(), fields: data.fields.length, photos: photos.length
+  };
   toast(`Backup erstellt: ${data.fields.length} Felder, ${photos.length} Fotos ✓`);
+  renderData();
+}
+
+function downloadBackup() {
+  const b = App.lastBackup; if (!b) return;
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(b.blob);
+  a.download = b.filename;
+  a.click(); URL.revokeObjectURL(a.href);
+}
+
+async function shareBackup() {
+  const b = App.lastBackup; if (!b) return;
+  const file = new File([b.blob], b.filename, { type: "application/json" });
+  if (navigator.canShare && navigator.canShare({ files: [file] })) {
+    try {
+      await navigator.share({ files: [file], title: "Getreide-Backup", text: `Backup vom ${fmtDate(todayISO())}` });
+    } catch (e) {
+      if (e.name !== "AbortError") toast("Teilen fehlgeschlagen: " + e.message);
+    }
+  } else {
+    downloadBackup();
+    toast("Teilen wird auf diesem Gerät nicht unterstützt – Datei wurde stattdessen heruntergeladen.");
+  }
 }
 
 async function importAll(json, mode) {
@@ -1035,7 +1134,18 @@ function renderData() {
       <div class="card"><div class="card-body">
         <h3>⬇️ Export / Backup</h3>
         <p>Speichert alle Felder, Notizen, Quellen, eigene Unkraut-/Krankheitseinträge, Erntedaten und Fotos in einer einzigen JSON-Datei.</p>
-        <button class="btn" id="d-export">Backup herunterladen</button>
+        <button class="btn" id="d-export">Backup erstellen</button>
+        ${App.lastBackup ? `
+        <div class="backup-file">
+          <div class="flex-between">
+            <div>📄 <strong>${esc(App.lastBackup.filename)}</strong><br>
+              <span class="muted" style="font-size:.8rem">${App.lastBackup.fields} Felder · ${App.lastBackup.photos} Fotos · ${Math.round(App.lastBackup.blob.size / 1024)} kB · erstellt ${App.lastBackup.createdAt.toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" })} Uhr</span></div>
+          </div>
+          <div class="row" style="margin-top:10px">
+            <button class="btn small" id="d-share">📤 Teilen / Versenden</button>
+            <button class="btn small ghost" id="d-download">⬇️ Herunterladen</button>
+          </div>
+        </div>` : ""}
       </div></div>
       <div class="card"><div class="card-body">
         <h3>⬆️ Import / Wiederherstellen</h3>
@@ -1054,6 +1164,8 @@ function renderData() {
     </div></div>
   `;
   $("#d-export").onclick = () => exportAll();
+  $("#d-share") && ($("#d-share").onclick = () => shareBackup());
+  $("#d-download") && ($("#d-download").onclick = () => downloadBackup());
   const doImport = async (mode) => {
     const file = $("#d-file").files[0];
     if (!file) { toast("Bitte zuerst eine Backup-Datei wählen."); return; }
@@ -1146,6 +1258,76 @@ function renderKnowledge() {
   });
 }
 
+/* ---------- Blattstadien / BBCH-Infothek ---------- */
+// Illustrationen als Inline-SVG (funktionieren offline, skalierbar, keine externen Bilder).
+const STAGE_SVG = {
+  keimung: `<svg viewBox="0 0 120 120"><rect x="0" y="86" width="120" height="34" fill="#3a2a18"/><path d="M60 86 C60 74 58 66 56 60" stroke="#7bbf5a" stroke-width="3" fill="none" stroke-linecap="round"/><path d="M56 62 q-9 -4 -14 -1 q6 6 14 3z" fill="#8fd06a"/><circle cx="60" cy="96" r="4" fill="#e9c46a"/></svg>`,
+  bestockung: `<svg viewBox="0 0 120 120"><rect x="0" y="86" width="120" height="34" fill="#3a2a18"/><g stroke="#5aa845" stroke-width="3.4" fill="none" stroke-linecap="round"><path d="M60 86 C60 60 60 46 60 36"/><path d="M60 78 C48 66 44 56 42 48"/><path d="M60 76 C72 64 78 54 80 46"/><path d="M60 82 C52 74 48 68 46 62"/><path d="M60 82 C68 74 72 68 74 62"/></g></svg>`,
+  schossen: `<svg viewBox="0 0 120 120"><rect x="0" y="86" width="120" height="34" fill="#3a2a18"/><path d="M60 86 L60 24" stroke="#4f9a3f" stroke-width="5" stroke-linecap="round"/><path d="M60 60 q-18 -6 -26 -18" stroke="#6cbb52" stroke-width="3.4" fill="none" stroke-linecap="round"/><path d="M60 48 q18 -6 26 -18" stroke="#6cbb52" stroke-width="3.4" fill="none" stroke-linecap="round"/><ellipse cx="60" cy="52" rx="7" ry="11" fill="#8fd06a" opacity=".6"/></svg>`,
+  aehrenschieben: `<svg viewBox="0 0 120 120"><rect x="0" y="86" width="120" height="34" fill="#3a2a18"/><path d="M60 86 L60 30" stroke="#4f9a3f" stroke-width="5" stroke-linecap="round"/><g fill="#9bd66f"><ellipse cx="60" cy="24" rx="6" ry="12"/><ellipse cx="52" cy="34" rx="4" ry="8"/><ellipse cx="68" cy="34" rx="4" ry="8"/><ellipse cx="53" cy="46" rx="4" ry="8"/><ellipse cx="67" cy="46" rx="4" ry="8"/></g></svg>`,
+  bluete: `<svg viewBox="0 0 120 120"><rect x="0" y="86" width="120" height="34" fill="#3a2a18"/><path d="M60 86 L60 30" stroke="#5a9a45" stroke-width="5" stroke-linecap="round"/><g fill="#c7e59a"><ellipse cx="60" cy="24" rx="6" ry="12"/><ellipse cx="52" cy="34" rx="4" ry="8"/><ellipse cx="68" cy="34" rx="4" ry="8"/><ellipse cx="53" cy="46" rx="4" ry="8"/><ellipse cx="67" cy="46" rx="4" ry="8"/></g><g stroke="#e9c46a" stroke-width="1.6"><path d="M50 30 l-7 3"/><path d="M70 30 l7 3"/><path d="M49 42 l-7 3"/><path d="M71 42 l7 3"/></g></svg>`,
+  milchreife: `<svg viewBox="0 0 120 120"><rect x="0" y="86" width="120" height="34" fill="#3a2a18"/><path d="M64 86 C60 60 58 44 60 28" stroke="#a9b84a" stroke-width="5" fill="none" stroke-linecap="round"/><g fill="#d9d15e"><ellipse cx="60" cy="24" rx="6" ry="12"/><ellipse cx="52" cy="34" rx="4.5" ry="9"/><ellipse cx="68" cy="34" rx="4.5" ry="9"/><ellipse cx="53" cy="47" rx="4.5" ry="9"/><ellipse cx="67" cy="47" rx="4.5" ry="9"/></g><g stroke="#c9b84a" stroke-width="1.4"><path d="M60 14 l0 -8"/><path d="M52 24 l-4 -8"/><path d="M68 24 l4 -8"/></g></svg>`,
+  teigreife: `<svg viewBox="0 0 120 120"><rect x="0" y="86" width="120" height="34" fill="#3a2a18"/><path d="M66 86 C58 58 56 42 62 26" stroke="#c6a53e" stroke-width="5" fill="none" stroke-linecap="round"/><g fill="#e5b84e"><ellipse cx="62" cy="24" rx="6" ry="12"/><ellipse cx="54" cy="34" rx="5" ry="9"/><ellipse cx="70" cy="34" rx="5" ry="9"/><ellipse cx="55" cy="47" rx="5" ry="9"/><ellipse cx="69" cy="47" rx="5" ry="9"/></g><g stroke="#caa23a" stroke-width="1.4"><path d="M62 14 l0 -8"/><path d="M54 24 l-4 -8"/><path d="M70 24 l4 -8"/></g></svg>`,
+  vollreife: `<svg viewBox="0 0 120 120"><rect x="0" y="86" width="120" height="34" fill="#3a2a18"/><path d="M72 86 C58 60 54 42 66 22" stroke="#b98a2e" stroke-width="5" fill="none" stroke-linecap="round"/><g fill="#e0a636"><ellipse cx="68" cy="20" rx="6" ry="12" transform="rotate(12 68 20)"/><ellipse cx="59" cy="30" rx="5" ry="9" transform="rotate(12 59 30)"/><ellipse cx="75" cy="30" rx="5" ry="9" transform="rotate(12 75 30)"/><ellipse cx="60" cy="44" rx="5" ry="9" transform="rotate(12 60 44)"/><ellipse cx="74" cy="44" rx="5" ry="9" transform="rotate(12 74 44)"/></g><g stroke="#c68f2c" stroke-width="1.4"><path d="M68 8 l3 -8"/><path d="M58 20 l-4 -8"/><path d="M78 20 l4 -8"/></g></svg>`,
+  buchweizen_jung: `<svg viewBox="0 0 120 120"><rect x="0" y="86" width="120" height="34" fill="#3a2a18"/><path d="M60 86 L60 40" stroke="#c0574a" stroke-width="3.5" stroke-linecap="round"/><g fill="#6cbb52"><path d="M60 58 q-16 -10 -24 -4 q10 12 24 6z"/><path d="M60 48 q16 -10 24 -4 q-10 12 -24 6z"/></g></svg>`,
+  buchweizen_bluete: `<svg viewBox="0 0 120 120"><rect x="0" y="86" width="120" height="34" fill="#3a2a18"/><path d="M60 86 L60 30" stroke="#b0503f" stroke-width="3.5" stroke-linecap="round"/><g fill="#5aa845"><path d="M60 66 q-16 -10 -24 -4 q10 12 24 6z"/><path d="M60 56 q16 -10 24 -4 q-10 12 -24 6z"/></g><g fill="#f2e6ef" stroke="#d7a9c6" stroke-width="1"><circle cx="60" cy="26" r="4.5"/><circle cx="50" cy="34" r="4"/><circle cx="70" cy="34" r="4"/><circle cx="55" cy="44" r="4"/><circle cx="66" cy="44" r="4"/></g></svg>`
+};
+
+const CEREAL_STAGES_INFO = [
+  { svg: "keimung", bbch: "00–09", name: "Keimung / Auflaufen", text: "Das Korn quillt, keimt und der erste Trieb (Koleoptile) durchstößt den Boden. Sichtbar wird das erste Laubblatt. Wichtig sind gute Bodenfeuchte und Saattiefe." },
+  { svg: "bestockung", bbch: "10–29", name: "Blattentwicklung & Bestockung", text: "Die Pflanze bildet Laubblätter und beginnt zu bestocken – aus einem Korn entstehen mehrere Seitentriebe (Bestockungstriebe). Die Bestockung bestimmt maßgeblich die spätere Ährenzahl. Idealer Zeitpunkt fürs Striegeln gegen Unkraut." },
+  { svg: "schossen", bbch: "30–39", name: "Schossen (Schaftstreckung)", text: "Der Haupttrieb streckt sich, die Halmknoten werden fühlbar. Ab dem 1-Knoten-Stadium reagiert das Getreide empfindlich – mechanische Eingriffe nur noch vorsichtig. Hoher Nährstoff- und Wasserbedarf." },
+  { svg: "aehrenschieben", bbch: "40–59", name: "Ährenschwellen & Ährenschieben", text: "Die Ähre schwillt in der Blattscheide an (Grannenspitzen werden sichtbar) und schiebt sich schließlich heraus. Bei Gerste erkennbar an den langen Grannen, bei Weizen/Dinkel an der kompakten Ähre." },
+  { svg: "bluete", bbch: "60–69", name: "Blüte", text: "Die Blüte erfolgt meist selbstbefruchtend, oft sind die Staubbeutel sichtbar. Kritische Phase für Ährenfusariose bei feucht-warmer Witterung. Roggen ist Fremdbefruchter (Windbestäubung)." },
+  { svg: "milchreife", bbch: "70–79", name: "Milchreife (Kornfüllung)", text: "Die Körner füllen sich, der Inhalt ist milchig-flüssig. Ähre und Halm noch grün. Entscheidende Phase für den Ertrag – Wasserstress reduziert jetzt die Kornfüllung." },
+  { svg: "teigreife", bbch: "80–89", name: "Teigreife", text: "Der Korninhalt wird teigig-fest, die Bestände färben sich gelb. Bei Erreichen der Gelbreife ist die Einlagerung weitgehend abgeschlossen." },
+  { svg: "vollreife", bbch: "90–99", name: "Vollreife / Erntereif", text: "Die Körner sind hart, das Stroh trocken und gelb-braun. Ähren neigen sich. Bei Kornfeuchte unter ~14–15 % kann gedroschen werden – Erntezeitpunkt." }
+];
+
+const BUCKWHEAT_STAGES_INFO = [
+  { svg: "keimung", bbch: "00–09", name: "Keimung / Auflaufen", text: "Buchweizen (kein echtes Getreide, sondern ein Knöterichgewächs) keimt rasch und wärmeliebend. Die Keimblätter (Kotyledonen) sind herzförmig." },
+  { svg: "buchweizen_jung", bbch: "10–19", name: "Jugendentwicklung (Blattbildung)", text: "Schnelle Jugendentwicklung mit rötlichem Stängel und herzförmigen Blättern. Buchweizen unterdrückt durch rasches Wachstum viele Beikräuter – beliebt als Zwischenfrucht." },
+  { svg: "buchweizen_bluete", bbch: "50–69", name: "Knospen- & Vollblüte", text: "Lange, gestaffelte Blüte mit weiß-rosa Blüten – wertvolle Bienenweide. Blüte und Kornansatz laufen gleichzeitig, daher reift Buchweizen ungleichmäßig ab." },
+  { svg: "milchreife", bbch: "70–79", name: "Kornbildung & -füllung", text: "Die dreikantigen Nüsschen bilden sich. Da Blüte und Reife überlappen, sind gleichzeitig Blüten und reife Körner an der Pflanze." },
+  { svg: "vollreife", bbch: "80–99", name: "Abreife / Erntereif", text: "Ein Großteil der Körner ist braun-schwarz und hart. Geerntet wird, wenn ~70–75 % der Körner reif sind – ein Kompromiss wegen der ungleichen Abreife. Frostempfindlich." }
+];
+
+function stageAccordion(list) {
+  return list.map((s, i) => `
+    <div class="stage-info">
+      <div class="stage-svg">${STAGE_SVG[s.svg] || ""}</div>
+      <div class="stage-info-body">
+        <div class="flex-between"><strong>${i + 1}. ${esc(s.name)}</strong><span class="badge info">BBCH ${esc(s.bbch)}</span></div>
+        <p style="margin:.4em 0 0">${esc(s.text)}</p>
+      </div>
+    </div>`).join("");
+}
+
+function renderStages() {
+  const v = $("#view-stages");
+  v.innerHTML = `
+    <div class="view-head"><div><h2>🌱 Blattstadien &amp; Wachstum</h2>
+      <p class="lead">Die Entwicklungsstadien der Getreidearten – erklärt und illustriert. Die Einteilung folgt der internationalen <strong>BBCH-Skala</strong> (00 = Keimung … 99 = Vollreife), auf der auch die Ernteprognose der App beruht.</p></div></div>
+
+    <div class="card"><div class="card-body">
+      <h3>🌾 Getreide (Dinkel, Weizen, Roggen, Gerste, Hafer)</h3>
+      <p class="muted" style="font-size:.9rem">Die Stadien laufen bei allen echten Getreidearten sehr ähnlich ab. Kulturspezifische Besonderheiten sind bei den einzelnen Stadien vermerkt.</p>
+      <div class="stage-info-list">${stageAccordion(CEREAL_STAGES_INFO)}</div>
+    </div></div>
+
+    <div class="card" style="margin-top:16px"><div class="card-body">
+      <h3>🔺 Buchweizen (Sonderfall)</h3>
+      <p class="muted" style="font-size:.9rem">Buchweizen ist botanisch kein Getreide (Knöterichgewächs) und reift wegen der langen, gestaffelten Blüte ungleichmäßig ab – daher eine eigene Stadien-Einteilung.</p>
+      <div class="stage-info-list">${stageAccordion(BUCKWHEAT_STAGES_INFO)}</div>
+    </div></div>
+
+    <div class="card" style="margin-top:16px"><div class="card-body">
+      <h3>ℹ️ Was bedeutet BBCH?</h3>
+      <p>Die <strong>BBCH-Skala</strong> beschreibt Entwicklungsstadien von Pflanzen mit einem zweistelligen Code (00–99). Die Zehnerstelle steht für die Hauptphase (z. B. 1x = Blattentwicklung, 3x = Schossen, 6x = Blüte, 9x = Reife), die Einerstelle für die Feinstufe. So lässt sich der Entwicklungsstand exakt und kulturübergreifend benennen – wichtig für Pflanzenschutz-, Striegel- und Erntetermine.</p>
+    </div></div>
+  `;
+}
+
 /* ---------- Assistent (Claude API) ---------- */
 // Läuft NICHT lokal: Fragen + eine kurze Datenzusammenfassung gehen über den
 // eigenen API-Key direkt an api.anthropic.com. Key/Modell/Chatverlauf liegen
@@ -1195,6 +1377,12 @@ function buildSystemPrompt() {
     `Wachstumsstadien, Krankheiten/Schädlingen und Unkrautregulierung (v. a. Bio-Maßnahmen) sowie zu den unten aufgeführten ` +
     `eigenen Daten des Nutzers. Nutze die Websuche, wenn dein Wissen für eine aktuelle oder spezifische Frage nicht ausreicht ` +
     `(z. B. aktuelle Wetterlage, Marktpreise, neue Studien). Antworte auf Deutsch, praxisnah und knapp.\n\n` +
+    `BILDANALYSE: Wenn der Nutzer ein Foto von Boden, Pflanze oder Bestand schickt, analysiere es: ` +
+    `(1) bestimme sichtbare Beikräuter/Unkräuter möglichst genau (deutscher + botanischer Name), ` +
+    `(2) beurteile Kulturpflanze, Entwicklungsstadium und auffällige Krankheits-/Nährstoff-/Schädlingssymptome, ` +
+    `(3) beurteile den Boden (Struktur, Verschlämmung, Bewuchs) soweit erkennbar, ` +
+    `(4) gib konkrete Bio-taugliche Handlungsempfehlungen (Striegeln/Hacken, Zeitpunkt, Fruchtfolge, Vorbeugung). ` +
+    `Nenne deine Unsicherheit offen, wenn das Bild keine sichere Bestimmung zulässt, und frage ggf. nach einem schärferen Detailfoto.\n\n` +
     `--- Daten des Nutzers ---\n${buildAssistantContext()}`;
 }
 
@@ -1202,17 +1390,55 @@ async function persistChat() {
   await DB.put("settings", { id: "chatHistory", messages: App.chatMessages });
 }
 
-async function sendAssistantMessage(userText) {
+// Bild client-seitig auf max. Kantenlänge verkleinern und als JPEG-DataURL zurückgeben
+// (spart Tokens/Bandbreite; das Original wird nicht gespeichert).
+function resizeImageToDataURL(file, maxEdge = 1024, quality = 0.8) {
+  return new Promise((res, rej) => {
+    const img = new Image();
+    img.onload = () => {
+      let { width, height } = img;
+      if (width > maxEdge || height > maxEdge) {
+        const sc = maxEdge / Math.max(width, height);
+        width = Math.round(width * sc); height = Math.round(height * sc);
+      }
+      const cv = document.createElement("canvas");
+      cv.width = width; cv.height = height;
+      cv.getContext("2d").drawImage(img, 0, 0, width, height);
+      res(cv.toDataURL("image/jpeg", quality));
+      URL.revokeObjectURL(img.src);
+    };
+    img.onerror = () => rej(new Error("Bild konnte nicht gelesen werden"));
+    img.src = URL.createObjectURL(file);
+  });
+}
+
+// Chat-Nachricht → API-Content: mit Bild als Vision-Block, sonst reiner Text.
+function chatMsgToApi(m) {
+  if (m.role === "user" && m.imageDataURL) {
+    const [meta, b64] = m.imageDataURL.split(",");
+    const media = (meta.match(/:(.*?);/) || [])[1] || "image/jpeg";
+    return {
+      role: "user",
+      content: [
+        { type: "image", source: { type: "base64", media_type: media, data: b64 } },
+        { type: "text", text: m.text || "Analysiere dieses Foto." }
+      ]
+    };
+  }
+  return { role: m.role, content: m.text };
+}
+
+async function sendAssistantMessage(userText, imageDataURL) {
   const key = App.assistantSettings.apiKey;
   if (!key) { toast("Bitte zuerst einen Anthropic API-Key hinterlegen."); return; }
 
-  App.chatMessages.push({ role: "user", text: userText });
+  App.chatMessages.push({ role: "user", text: userText, imageDataURL: imageDataURL || null });
   App.chatBusy = true;
   await persistChat();
   renderChatMessages();
 
   const tools = App.assistantSettings.webSearch ? [{ type: "web_search_20260209", name: "web_search", max_uses: 3 }] : [];
-  let messages = App.chatMessages.filter(m => !m.error).map(m => ({ role: m.role, content: m.text }));
+  let messages = App.chatMessages.filter(m => !m.error).map(chatMsgToApi);
 
   try {
     let finalText = "";
@@ -1270,7 +1496,9 @@ function renderChatMessages() {
   for (const m of App.chatMessages) {
     const d = document.createElement("div");
     d.className = "chat-msg " + (m.role === "user" ? "user" : "assistant") + (m.error ? " error" : "");
-    let html = mdLite(m.text);
+    let html = "";
+    if (m.imageDataURL) html += `<img class="chat-img" src="${m.imageDataURL}" alt="Foto" />`;
+    html += mdLite(m.text);
     if (m.citations?.length) {
       html += `<div class="chat-sources">Quellen: ${m.citations.map((u, i) => `<a href="${esc(u)}" target="_blank" rel="noopener">[${i + 1}]</a>`).join(" ")}</div>`;
     }
@@ -1315,11 +1543,15 @@ function renderAssistant() {
       <div style="margin-top:10px"><button class="btn" id="as-save">Speichern</button></div>
     </div></div>
     <div class="card"><div class="card-body">
-      <div class="flex-between"><h3>💬 Chat</h3><button class="btn small ghost" id="as-clear">Verlauf löschen</button></div>
+      <div class="flex-between"><h3>💬 Chat &amp; Bildanalyse</h3><button class="btn small ghost" id="as-clear">Verlauf löschen</button></div>
+      <p class="hint" style="margin-top:-4px">Tipp: 📷-Button unten antippen, um ein Foto (Boden, Pflanze, Unkraut) zur Analyse hochzuladen.</p>
       ${hasKey ? "" : `<p class="muted">Bitte zuerst oben einen API-Key hinterlegen, um den Assistenten zu nutzen.</p>`}
       <div id="as-messages" class="chat-messages"></div>
+      <div id="as-image-preview" class="chat-attach hidden"></div>
       <div class="chat-input-row">
-        <textarea id="as-input" placeholder="Frage stellen … (z. B. „Wie weit ist mein Dinkel-Feld?“)" ${hasKey ? "" : "disabled"}></textarea>
+        <input type="file" id="as-file" accept="image/*" capture="environment" hidden />
+        <button class="btn ghost chat-cam" id="as-cam" title="Foto anhängen" ${hasKey ? "" : "disabled"}>📷</button>
+        <textarea id="as-input" placeholder="Frage stellen oder Foto analysieren lassen …" ${hasKey ? "" : "disabled"}></textarea>
         <button class="btn" id="as-send" ${hasKey ? "" : "disabled"}>Senden</button>
       </div>
     </div></div>
@@ -1341,16 +1573,35 @@ function renderAssistant() {
     renderChatMessages();
   };
   const input = $("#as-input");
+  const renderImagePreview = () => {
+    const box = $("#as-image-preview");
+    if (App.chatImage) {
+      box.classList.remove("hidden");
+      box.innerHTML = `<img src="${App.chatImage}" alt="Vorschau" /><button class="chat-attach-del" id="as-img-del" title="Entfernen">×</button>`;
+      $("#as-img-del").onclick = () => { App.chatImage = null; renderImagePreview(); };
+    } else {
+      box.classList.add("hidden"); box.innerHTML = "";
+    }
+  };
   const send = () => {
     const text = input.value.trim();
-    if (!text || App.chatBusy) return;
-    input.value = "";
-    sendAssistantMessage(text);
+    if ((!text && !App.chatImage) || App.chatBusy) return;
+    const img = App.chatImage;
+    input.value = ""; App.chatImage = null; renderImagePreview();
+    sendAssistantMessage(text || "Bitte analysiere dieses Foto (Boden/Pflanze/Unkraut) und gib Bio-Tipps.", img);
+  };
+  if ($("#as-cam")) $("#as-cam").onclick = () => $("#as-file").click();
+  if ($("#as-file")) $("#as-file").onchange = async (e) => {
+    const file = e.target.files[0]; if (!file) return;
+    try { App.chatImage = await resizeImageToDataURL(file); renderImagePreview(); }
+    catch (err) { toast("Bild-Fehler: " + err.message); }
+    e.target.value = "";
   };
   if ($("#as-send")) $("#as-send").onclick = send;
   if (input) input.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
   });
+  renderImagePreview();
   renderChatMessages();
 }
 
